@@ -39,10 +39,19 @@ func TestIdempotency_Jobs(t *testing.T) {
 	stop, err := c.Jobs().StartWorkers(ctx, map[string]int{"g1":1})
 	if err != nil { t.Fatalf("workers: %v", err) }
 	defer stop(ctx)
+
+	// Give workers time to start
+	time.Sleep(100 * time.Millisecond)
+
 	key := "k1"
-	for i := 0; i < 5; i++ { _ = c.Jobs().Enqueue(ctx, "it.idem.job", []byte("p"), tq.WithKey(key)) }
-	time.Sleep(2 * time.Second)
-	if atomic.LoadInt64(&n) != 1 { t.Fatalf("expected 1 execution, got %d", n) }
+	for i := 0; i < 5; i++ {
+		if err := c.Jobs().Enqueue(ctx, "it.idem.job", []byte("p"), tq.WithKey(key)); err != nil {
+			t.Fatalf("enqueue %d: %v", i, err)
+		}
+	}
+	time.Sleep(3 * time.Second)
+	got := atomic.LoadInt64(&n)
+	if got != 1 { t.Fatalf("expected 1 execution, got %d", got) }
 }
 
 func TestIdempotency_EventBus(t *testing.T) {
@@ -55,7 +64,7 @@ func TestIdempotency_EventBus(t *testing.T) {
 	defer rdb.Close()
 
 	cfg := tq.Config{
-		MQ: tq.MQConfig{Provider: tq.MQProviderRabbitMQ, RabbitMQ: tq.RabbitMQConfig{URI: uri, Exchange: ex}},
+		MQ: tq.MQConfig{Provider: tq.MQProviderRabbitMQ, RabbitMQ: tq.RabbitMQConfig{URI: uri, Exchange: ex, DelayedExchange: os.Getenv("TQ_RABBITMQ_DELAYED_EXCHANGE")}},
 		Idempotency: tq.IdempotencyConfig{KV: tq.RedisKV{R: rdb}, Prefix: "tq:test:idem:bus", TTL: 10 * time.Second},
 	}
 	ctx := context.Background()

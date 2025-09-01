@@ -1,0 +1,19 @@
+FROM rabbitmq:3.12-management
+
+# Install wget to download plugin
+RUN apt-get update -qq && apt-get install -y -qq wget && rm -rf /var/lib/apt/lists/*
+
+# Download delayed message exchange plugin matching RabbitMQ 3.12
+# Use the correct version for RabbitMQ 3.12
+RUN cd /opt/rabbitmq/plugins && \
+    wget -O rabbitmq_delayed_message_exchange-3.12.0.ez \
+    https://github.com/rabbitmq/rabbitmq-delayed-message-exchange/releases/download/v3.12.0/rabbitmq_delayed_message_exchange-3.12.0.ez && \
+    ls -la rabbitmq_delayed_message_exchange-3.12.0.ez
+
+# Enable plugin offline so it is active at runtime
+RUN rabbitmq-plugins enable --offline rabbitmq_delayed_message_exchange rabbitmq_management
+
+# Environment for default credentials
+ENV RABBITMQ_DEFAULT_USER=admin \
+    RABBITMQ_DEFAULT_PASS=admin123
+

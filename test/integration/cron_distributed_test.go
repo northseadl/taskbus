@@ -20,9 +20,11 @@ func TestCron_Distributed(t *testing.T) {
 		Cron: tq.CronConfig{Distributed: true, ExecutorGroup: "it-cron"},
 	}
 	ctx := context.Background()
-	c1, _ := tq.New(ctx, cfg)
-	c2, _ := tq.New(ctx, cfg)
+	c1, err := tq.New(ctx, cfg)
+	if err != nil { t.Fatalf("new c1: %v", err) }
 	defer c1.Close(ctx)
+	c2, err := tq.New(ctx, cfg)
+	if err != nil { t.Fatalf("new c2: %v", err) }
 	defer c2.Close(ctx)
 
 	var n int64

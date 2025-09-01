@@ -23,7 +23,7 @@ type cronDist struct {
 	leaderCancel context.CancelFunc
 	execStop     func(context.Context) error
 
-	// scheduler state
+	// 调度器状态
 	cron   *cronv3.Cron
 	lockCh chan struct{}
 }
@@ -41,7 +41,7 @@ func newCron(c *client) Cron {
 	return newCronLocal(c)
 }
 
-// --- Local impl kept in cron_impl_local.go ---
+// --- 本地实现保留在 cron_impl_local.go 中 ---
 
 func (cd *cronDist) Add(spec string, name string, fn func(context.Context) error, mws ...CronMiddleware) (string, error) {
 	if fn == nil {
@@ -97,7 +97,7 @@ func (cd *cronDist) Stop(ctx context.Context) error {
 	return nil
 }
 
-// --- Scheduler (Leader only) ---
+// --- 调度器（仅 Leader 实例）---
 
 func (cd *cronDist) leaderLoop() {
 	for {
@@ -231,7 +231,7 @@ func (cd *cronDist) publishFunc(name string) func(context.Context) error {
 	}
 }
 
-// --- Executor (All instances) ---
+// --- 执行器（所有实例）---
 
 func (cd *cronDist) startExecutor(ctx context.Context) (func(context.Context) error, error) {
 	group := cd.c.cfg.Cron.ExecutorGroup

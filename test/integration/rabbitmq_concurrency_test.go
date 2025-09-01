@@ -15,7 +15,7 @@ func TestRabbitMQ_Concurrency(t *testing.T) {
 	ex := os.Getenv("TQ_RABBITMQ_EXCHANGE")
 	if uri == "" || ex == "" { t.Skip("rabbitmq env not set; skipping test") }
 
-	cfg := tq.Config{MQ: tq.MQConfig{Provider: tq.MQProviderRabbitMQ, RabbitMQ: tq.RabbitMQConfig{URI: uri, Exchange: ex, Prefetch: 64, ConsumerConcurrency: 8}}}
+	cfg := tq.Config{MQ: tq.MQConfig{Provider: tq.MQProviderRabbitMQ, RabbitMQ: tq.RabbitMQConfig{URI: uri, Exchange: ex, Prefetch: 64, ConsumerConcurrency: 8, DelayedExchange: os.Getenv("TQ_RABBITMQ_DELAYED_EXCHANGE")}}}
 	ctx := context.Background()
 	c, err := tq.New(ctx, cfg)
 	if err != nil { t.Fatalf("new: %v", err) }
