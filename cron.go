@@ -16,8 +16,9 @@ type noopCron struct{}
 
 func newNoopCron() Cron { return noopCron{} }
 
-func (noopCron) Add(spec, name string, fn func(context.Context) error, mws ...CronMiddleware) (string, error) { return "", nil }
-func (noopCron) Remove(id string) error                                                                       { return nil }
-func (noopCron) Start(ctx context.Context) error                                                               { return nil }
-func (noopCron) Stop(ctx context.Context) error                                                                { return nil }
-
+func (noopCron) Add(spec, name string, fn func(context.Context) error, mws ...CronMiddleware) (string, error) {
+	return "", nil
+}
+func (noopCron) Remove(id string) error          { return nil }
+func (noopCron) Start(ctx context.Context) error { return nil }
+func (noopCron) Stop(ctx context.Context) error  { return nil }

@@ -200,7 +200,9 @@ func (cd *cronDist) startScheduler(ctx context.Context) {
 	defer cd.mu.Unlock()
 	loc := time.Local
 	if tz := cd.c.cfg.Cron.Timezone; tz != "" {
-		if l, err := time.LoadLocation(tz); err == nil { loc = l }
+		if l, err := time.LoadLocation(tz); err == nil {
+			loc = l
+		}
 	}
 	cd.cron = cronv3.New(cronv3.WithSeconds(), cronv3.WithLocation(loc))
 	for name, t := range cd.reg {

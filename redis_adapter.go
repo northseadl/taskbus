@@ -34,7 +34,9 @@ type delayItem struct {
 }
 
 func newRedisAdapter(cfg RedisConfig, logger Logger) (MQ, error) {
-	if cfg.Addr == "" { return nil, fmt.Errorf("redis addr empty") }
+	if cfg.Addr == "" {
+		return nil, fmt.Errorf("redis addr empty")
+	}
 	rdb := redis.NewClient(&redis.Options{Addr: cfg.Addr, Username: cfg.Username, Password: cfg.Password, DB: cfg.DB})
 	ad := &redisAdapter{cfg: cfg, logger: logger, rdb: rdb, stopCh: make(chan struct{})}
 	ad.startDelayScheduler()
@@ -53,7 +55,9 @@ func (r *redisAdapter) startDelayScheduler() {
 			case <-time.After(200 * time.Millisecond):
 				now := float64(time.Now().UnixMilli())
 				items, err := r.rdb.ZRangeByScore(ctx, redisDelayZKey, &redis.ZRangeBy{Min: "-inf", Max: fmt.Sprintf("%f", now), Offset: 0, Count: 100}).Result()
-				if err != nil { continue }
+				if err != nil {
+					continue
+				}
 				for _, s := range items {
 					var di delayItem
 					if json.Unmarshal([]byte(s), &di) == nil {
@@ -79,11 +83,15 @@ func (r *redisAdapter) PublishDelay(ctx context.Context, msg Message, delay time
 }
 
 func (r *redisAdapter) Consume(ctx context.Context, topic, group string, handler Handler, mws ...Middleware) (func(context.Context) error, error) {
-	if group == "" { group = "default" }
+	if group == "" {
+		group = "default"
+	}
 	// 确保 group 存在，使用 "0" 从头开始读取
 	_ = r.rdb.XGroupCreateMkStream(ctx, topic, group, "0").Err()
 	final := handler
-	for i := len(mws) - 1; i >= 0; i-- { final = mws[i](final) }
+	for i := len(mws) - 1; i >= 0; i-- {
+		final = mws[i](final)
+	}
 
 	done := make(chan struct{})
 	cctx, cancel := context.WithCancel(ctx)
@@ -91,7 +99,9 @@ func (r *redisAdapter) Consume(ctx context.Context, topic, group string, handler
 	go func() {
 		defer func() { r.wg.Done(); close(done) }()
 		concurrency := r.cfg.ConsumerConcurrency
-		if concurrency <= 0 { concurrency = 1 }
+		if concurrency <= 0 {
+			concurrency = 1
+		}
 		sem := make(chan struct{}, concurrency)
 		for {
 			select {
@@ -107,8 +117,12 @@ func (r *redisAdapter) Consume(ctx context.Context, topic, group string, handler
 				Count:    int64(concurrency),
 				Block:    2 * time.Second,
 			}).Result()
-			if err == redis.Nil || (err != nil && cctx.Err() != nil) { continue }
-			if err != nil { continue }
+			if err == redis.Nil || (err != nil && cctx.Err() != nil) {
+				continue
+			}
+			if err != nil {
+				continue
+			}
 			for _, str := range res {
 				for _, xmsg := range str.Messages {
 					sem <- struct{}{}
@@ -122,21 +136,34 @@ func (r *redisAdapter) Consume(ctx context.Context, topic, group string, handler
 			}
 		}
 	}()
-	stop := func(sctx context.Context) error { cancel(); select { case <-done: return nil; case <-sctx.Done(): return sctx.Err() } }
+	stop := func(sctx context.Context) error {
+		cancel()
+		select {
+		case <-done:
+			return nil
+		case <-sctx.Done():
+			return sctx.Err()
+		}
+	}
 	return stop, nil
 }
 
 func (r *redisAdapter) Close(ctx context.Context) error {
 	close(r.stopCh)
 	done := make(chan struct{})
-	go func(){ r.wg.Wait(); close(done) }()
-	select { case <-done: default: }
+	go func() { r.wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	default:
+	}
 	return r.rdb.Close()
 }
 
 func (r *redisAdapter) publishStream(ctx context.Context, msg Message) error {
 	fields := map[string]interface{}{"key": msg.Key, "body": base64.StdEncoding.EncodeToString(msg.Body)}
-	for k, v := range msg.Headers { fields["h:"+k] = v }
+	for k, v := range msg.Headers {
+		fields["h:"+k] = v
+	}
 	return r.rdb.XAdd(ctx, &redis.XAddArgs{Stream: msg.Topic, Values: fields}).Err()
 }
 
@@ -146,13 +173,19 @@ func (r *redisAdapter) decodeXMessage(topic string, xm redis.XMessage) Message {
 	headers := make(map[string]string)
 	for k, v := range xm.Values {
 		switch k {
-		case "key": key, _ = v.(string)
+		case "key":
+			key, _ = v.(string)
 		case "body":
-			if s, ok := v.(string); ok { body, _ = base64.StdEncoding.DecodeString(s) }
+			if s, ok := v.(string); ok {
+				body, _ = base64.StdEncoding.DecodeString(s)
+			}
 		default:
-			if len(k) > 2 && k[:2] == "h:" { if s, ok := v.(string); ok { headers[k[2:]] = s } }
+			if len(k) > 2 && k[:2] == "h:" {
+				if s, ok := v.(string); ok {
+					headers[k[2:]] = s
+				}
+			}
 		}
 	}
 	return Message{Topic: topic, Key: key, Body: body, Headers: headers}
 }
-

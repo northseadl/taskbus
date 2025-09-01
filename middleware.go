@@ -13,4 +13,3 @@ type EventMiddleware func(next func(context.Context, Event) error) func(context.
 
 // CronMiddleware 用于 Cron 任务。
 type CronMiddleware func(next func(context.Context) error) func(context.Context) error
-

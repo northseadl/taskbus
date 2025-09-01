@@ -3,7 +3,7 @@ module taskbus-integration-tests
 go 1.24.6
 
 require (
-	github.com/northseadl/taskbus v0.2.0
+	github.com/northseadl/taskbus v0.3.0
 	github.com/redis/go-redis/v9 v9.12.1
 )
 

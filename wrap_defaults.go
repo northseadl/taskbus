@@ -43,4 +43,3 @@ func (w busWithMiddleware) Subscribe(topic, group string, filter Filter, handler
 	mws = append([]EventMiddleware{conv}, mws...)
 	return w.EventBus.Subscribe(topic, group, filter, handler, mws...)
 }
-

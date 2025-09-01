@@ -24,7 +24,10 @@ type JobHandler func(ctx context.Context, jobName string, payload []byte) error
 // EnqueueOption 入队选项。
 type EnqueueOption func(*enqueueOpts)
 
-type enqueueOpts struct { delay time.Duration; key string }
+type enqueueOpts struct {
+	delay time.Duration
+	key   string
+}
 
 // WithDelay 指定延时。
 func WithDelay(d time.Duration) EnqueueOption { return func(o *enqueueOpts) { o.delay = d } }
@@ -39,8 +42,9 @@ type noopJobs struct{}
 func newNoopJobs() Jobs { return noopJobs{} }
 
 func (noopJobs) Register(job Job) {}
-func (noopJobs) Enqueue(ctx context.Context, jobName string, payload []byte, opts ...EnqueueOption) error { return nil }
+func (noopJobs) Enqueue(ctx context.Context, jobName string, payload []byte, opts ...EnqueueOption) error {
+	return nil
+}
 func (noopJobs) StartWorkers(ctx context.Context, groups map[string]int, mws ...JobMiddleware) (func(context.Context) error, error) {
 	return func(context.Context) error { return nil }, nil
 }
-

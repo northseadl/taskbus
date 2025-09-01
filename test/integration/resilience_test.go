@@ -14,7 +14,9 @@ import (
 func TestRabbitMQ_Resilience_Reconnect(t *testing.T) {
 	uri := os.Getenv("TQ_RABBITMQ_URI")
 	ex := os.Getenv("TQ_RABBITMQ_EXCHANGE")
-	if uri == "" || ex == "" { t.Skip("rabbitmq env not set; skipping test") }
+	if uri == "" || ex == "" {
+		t.Skip("rabbitmq env not set; skipping test")
+	}
 
 	cfg := tq.Config{MQ: tq.MQConfig{Provider: tq.MQProviderRabbitMQ, RabbitMQ: tq.RabbitMQConfig{URI: uri, Exchange: ex, DelayedExchange: os.Getenv("TQ_RABBITMQ_DELAYED_EXCHANGE")}}}
 	ctx := context.Background()
@@ -23,7 +25,9 @@ func TestRabbitMQ_Resilience_Reconnect(t *testing.T) {
 
 	// 1) Start consumer first to create the queue
 	c1, err := tq.New(ctx, cfg)
-	if err != nil { t.Fatalf("new c1: %v", err) }
+	if err != nil {
+		t.Fatalf("new c1: %v", err)
+	}
 
 	count := 0
 	done := make(chan struct{})
@@ -36,7 +40,9 @@ func TestRabbitMQ_Resilience_Reconnect(t *testing.T) {
 		}
 		return nil
 	})
-	if err != nil { t.Fatalf("consume: %v", err) }
+	if err != nil {
+		t.Fatalf("consume: %v", err)
+	}
 
 	// 2) Publish messages while consumer is active
 	for i := 0; i < 3; i++ {
@@ -57,7 +63,9 @@ func TestRabbitMQ_Resilience_Reconnect(t *testing.T) {
 
 	// 5) Create new client and verify it can connect and work
 	c2, err := tq.New(ctx, cfg)
-	if err != nil { t.Fatalf("new c2 after reconnect: %v", err) }
+	if err != nil {
+		t.Fatalf("new c2 after reconnect: %v", err)
+	}
 	defer c2.Close(ctx)
 
 	// 6) Start consumer first, then publish
@@ -70,7 +78,9 @@ func TestRabbitMQ_Resilience_Reconnect(t *testing.T) {
 		}
 		return nil
 	})
-	if err != nil { t.Fatalf("consume after reconnect: %v", err) }
+	if err != nil {
+		t.Fatalf("consume after reconnect: %v", err)
+	}
 	defer stop2(ctx)
 
 	// Give consumer time to start
@@ -88,4 +98,3 @@ func TestRabbitMQ_Resilience_Reconnect(t *testing.T) {
 		t.Fatalf("reconnected client failed to receive message")
 	}
 }
-

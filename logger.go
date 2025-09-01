@@ -14,6 +14,9 @@ type Logger interface {
 // defaultLogger 使用标准库 log，满足最小可用。
 type defaultLogger struct{}
 
-func (defaultLogger) Info(ctx context.Context, msg string, kv ...interface{})  { log.Println(append([]interface{}{"INFO", msg}, kv...)...) }
-func (defaultLogger) Error(ctx context.Context, msg string, kv ...interface{}) { log.Println(append([]interface{}{"ERROR", msg}, kv...)...) }
-
+func (defaultLogger) Info(ctx context.Context, msg string, kv ...interface{}) {
+	log.Println(append([]interface{}{"INFO", msg}, kv...)...)
+}
+func (defaultLogger) Error(ctx context.Context, msg string, kv ...interface{}) {
+	log.Println(append([]interface{}{"ERROR", msg}, kv...)...)
+}

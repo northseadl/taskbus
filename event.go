@@ -29,4 +29,3 @@ func (noopBus) Publish(ctx context.Context, e Event) error { return nil }
 func (noopBus) Subscribe(topic, group string, filter Filter, handler func(context.Context, Event) error, mws ...EventMiddleware) (func(context.Context) error, error) {
 	return func(context.Context) error { return nil }, nil
 }
-
