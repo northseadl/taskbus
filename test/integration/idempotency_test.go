@@ -1,4 +1,6 @@
 package integration
+// 幂等性集成测试：依赖 go-redis/v9 作为 KV 存储客户端
+
 
 import (
 	"context"
