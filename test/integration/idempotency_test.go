@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
+	redis "github.com/redis/go-redis/v9"
 	tq "github.com/northseadl/taskbus"
-	"github.com/redis/go-redis/v9"
 )
 
 type idemJob struct{ cnt *int64 }
