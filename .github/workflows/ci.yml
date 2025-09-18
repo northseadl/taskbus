@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    services:
+      rabbitmq:
+        image: rabbitmq:3.12-management
+        ports:
+          - 5673:5672
+          - 15673:15672
+        env:
+          RABBITMQ_DEFAULT_USER: admin
+          RABBITMQ_DEFAULT_PASS: admin123
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping" \
+          --health-interval 5s \
+          --health-timeout 3s \
+          --health-retries 30
+        # enable delayed plugin
+        # GitHub Actions services don't support command override easily; we exec later
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6380:6379
+        options: >-
+          --health-cmd "redis-cli ping" \
+          --health-interval 5s \
+          --health-timeout 3s \
+          --health-retries 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Wait for services
+        run: |
+          for i in {1..60}; do
+            docker ps
+            RQ=$(docker inspect -f '{{.State.Health.Status}}' $(docker ps -qf name=rabbitmq) || echo starting)
+            RS=$(docker inspect -f '{{.State.Health.Status}}' $(docker ps -qf name=redis) || echo starting)
+            echo "rabbitmq=$RQ redis=$RS"
+            if [ "$RQ" = healthy ] && [ "$RS" = healthy ]; then break; fi
+            sleep 3
+          done
+
+      - name: Enable delayed plugin
+        run: |
+          CID=$(docker ps -qf name=rabbitmq)
+          docker exec "$CID" rabbitmq-plugins enable --offline rabbitmq_delayed_message_exchange || true
+
+      - name: Run integration tests
+        env:
+          TQ_RABBITMQ_URI: amqp://admin:admin123@localhost:5673/
+          TQ_RABBITMQ_EXCHANGE: taskbus.events
+          TQ_RABBITMQ_DELAYED_EXCHANGE: taskbus.events.delayed
+          TQ_REDIS_ADDR: localhost:6380
+        run: |
+          go test ./test/integration -v
+
