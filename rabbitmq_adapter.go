@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
+	"strconv"
 	"sync"
 	"time"
 
@@ -15,6 +17,7 @@ import (
 
 type rabbitMQAdapter struct {
 	cfg    RabbitMQConfig
+	retry  RetryConfig
 	logger Logger
 	mode   DelayMode
 
@@ -22,14 +25,21 @@ type rabbitMQAdapter struct {
 	connMu sync.Mutex
 }
 
-func newRabbitMQAdapterWithMode(cfg RabbitMQConfig, mode DelayMode, logger Logger) (MQ, error) {
+func newRabbitMQAdapterWithMode(cfg RabbitMQConfig, mode DelayMode, retry RetryConfig, logger Logger) (MQ, error) {
 	if cfg.URI == "" || cfg.Exchange == "" {
 		return nil, fmt.Errorf("rabbitmq config invalid")
 	}
 	if mode == DelayModeStandard && cfg.DelayedExchange == "" {
 		return nil, fmt.Errorf("delayed exchange required in standard mode")
 	}
-	ad := &rabbitMQAdapter{cfg: cfg, mode: mode, logger: logger}
+	// dd dddddd
+	if retry.Base <= 0 {
+		retry.Base = time.Second
+	}
+	if retry.Factor <= 0 {
+		retry.Factor = 2.0
+	}
+	ad := &rabbitMQAdapter{cfg: cfg, mode: mode, retry: retry, logger: logger}
 	if err := ad.ensureConnection(); err != nil {
 		return nil, err
 	}
@@ -203,8 +213,29 @@ func (r *rabbitMQAdapter) Consume(ctx context.Context, topic, group string, hand
 					defer func() { <-sem; wg.Done() }()
 					m := Message{Topic: del.RoutingKey, Key: del.MessageId, Body: del.Body, Headers: tableToStringMap(del.Headers)}
 					if err := final(ctx, m); err != nil {
-						r.logger.Error(ctx, "consumer handler error", "topic", m.Topic, "err", err)
-						_ = del.Nack(false, true)
+						// 失败：统一应用层延迟重投（先发布后确认），发布失败则 Nack 重投
+						attempt := 0
+						if s, ok := m.Headers["x-retry-count"]; ok {
+							if n, e := strconv.Atoi(s); e == nil {
+								attempt = n
+							}
+						}
+						nextAttempt := attempt + 1
+						if nextAttempt <= r.retry.MaxRetries {
+							h := copyHeaders(m.Headers)
+							h["x-retry-count"] = strconv.Itoa(nextAttempt)
+							delay := time.Duration(float64(r.retry.Base) * math.Pow(r.retry.Factor, float64(nextAttempt-1)))
+							if err := r.PublishDelay(ctx, Message{Topic: m.Topic, Key: m.Key, Body: m.Body, Headers: h}, delay); err == nil {
+								_ = del.Ack(false)
+								return
+							}
+						}
+						// 超过最大重试：ACK；发布失败：Nack 重投
+						if nextAttempt > r.retry.MaxRetries {
+							_ = del.Ack(false)
+						} else {
+							_ = del.Nack(false, true)
+						}
 					} else {
 						_ = del.Ack(false)
 					}

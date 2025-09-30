@@ -45,13 +45,13 @@ func New(ctx context.Context, cfg Config, opts ...Option) (Client, error) {
 		if mode == "" {
 			mode = DelayModeStandard
 		}
-		mq, err := newRabbitMQAdapterWithMode(cfg.MQ.RabbitMQ, mode, c.logger)
+		mq, err := newRabbitMQAdapterWithMode(cfg.MQ.RabbitMQ, mode, cfg.MQ.Retry, c.logger)
 		if err != nil {
 			return nil, err
 		}
 		c.mq = mq
 	case MQProviderRedis:
-		mq, err := newRedisAdapter(cfg.MQ.Redis, c.logger)
+		mq, err := newRedisAdapter(cfg.MQ.Redis, cfg.MQ.Retry, c.logger)
 		if err != nil {
 			return nil, err
 		}

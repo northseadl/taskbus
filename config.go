@@ -35,6 +35,8 @@ type MQConfig struct {
 	Provider MQProvider
 	RabbitMQ RabbitMQConfig
 	Redis    RedisConfig
+	// 统一重试策略配置，适用于 MQ 层、EventBus、Jobs
+	Retry RetryConfig
 }
 
 type RabbitMQConfig struct {

@@ -3,9 +3,7 @@ package taskbus
 import (
 	"context"
 	"fmt"
-	"strconv"
 	"sync"
-	"time"
 )
 
 type jobs struct {
@@ -29,7 +27,7 @@ func (j *jobs) Enqueue(ctx context.Context, jobName string, payload []byte, opts
 	for _, fn := range opts {
 		fn(o)
 	}
-	headers := map[string]string{"x-attempt": "0"}
+	headers := map[string]string{"x-retry-count": "0"}
 	msg := Message{Topic: j.topic(jobName), Key: o.key, Body: payload, Headers: headers}
 	if o.delay > 0 {
 		return j.c.mq.PublishDelay(ctx, msg, o.delay)
@@ -42,10 +40,8 @@ func (j *jobs) StartWorkers(ctx context.Context, groups map[string]int, mws ...J
 		groups = map[string]int{"default": 1}
 	}
 	stops := make([]func(context.Context) error, 0, len(groups))
-	// 默认接入重试中间件
-	mqmw := j.retryMiddleware()
 	wrapped := j.wrap(mws...)
-	finalMW := func(next Handler) Handler { return mqmw(wrapped(next)) }
+	finalMW := func(next Handler) Handler { return wrapped(next) }
 	for group := range groups {
 		// 使用 RabbitMQ topic 通配符 job.#
 		stop, err := j.c.mq.Consume(ctx, "job.#", group, j.handle, finalMW)
@@ -76,41 +72,6 @@ func (j *jobs) handle(ctx context.Context, msg Message) error {
 	}
 	job := v.(Job)
 	return job.Execute(ctx, msg.Body)
-}
-
-// retryMiddleware 在 MQ 层处理 Job 执行失败后的延时重发。
-// 注意：为了避免与 MQ 层面的重试（Nack 重投）冲突，本中间件在捕获到错误后总是返回 nil，
-// 让 MQ 消费端执行 Ack，从而仅通过延时重发（PublishDelay）实现指数回退重试。
-func (j *jobs) retryMiddleware() Middleware {
-	policy := ExponentialBackoff{Base: j.c.cfg.Job.Retry.Base, Factor: j.c.cfg.Job.Retry.Factor, MaxRetries: j.c.cfg.Job.Retry.MaxRetries}
-	return func(next Handler) Handler {
-		return func(ctx context.Context, m Message) error {
-			err := next(ctx, m)
-			if err == nil {
-				return nil
-			}
-			attempt := 0
-			if m.Headers != nil {
-				if s, ok := m.Headers["x-attempt"]; ok {
-					if n, e := strconv.Atoi(s); e == nil {
-						attempt = n
-					}
-				}
-			}
-			if d, cont := policy.NextBackoff(attempt); cont {
-				// 重发到原 topic，attempt+1
-				h := copyHeaders(m.Headers)
-				h["x-attempt"] = strconv.Itoa(attempt + 1)
-				_ = j.c.mq.PublishDelay(ctx, Message{Topic: m.Topic, Key: m.Key, Body: m.Body, Headers: h}, d)
-				return nil // 吞掉错误，避免 MQ Nack 重投
-			}
-			// 路由到死信
-			if dl := j.c.cfg.Job.DeadLetterTopic; dl != "" {
-				_ = j.c.mq.Publish(ctx, Message{Topic: dl, Key: m.Key, Body: m.Body, Headers: map[string]string{"x-dead": time.Now().Format(time.RFC3339)}})
-			}
-			return nil // 吞掉错误，Ack 消息
-		}
-	}
 }
 
 func (j *jobs) wrap(mws ...JobMiddleware) Middleware {
