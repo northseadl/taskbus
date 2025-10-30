@@ -34,6 +34,9 @@ func New(ctx context.Context, cfg Config, opts ...Option) (Client, error) {
 		cfg:    cfg,
 		logger: defaultLogger{},
 	}
+	if c.cfg.Job.DefaultGroup == "" {
+		c.cfg.Job.DefaultGroup = "default"
+	}
 	for _, opt := range opts {
 		opt(c)
 	}

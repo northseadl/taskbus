@@ -60,6 +60,10 @@ type RedisConfig struct {
 type JobConfig struct {
 	Retry           RetryConfig
 	DeadLetterTopic string
+	// GroupPrefix 用于在消费组名前追加统一前缀，实现跨服务隔离。
+	GroupPrefix string
+	// DefaultGroup 当调用方未指定消费组或传入空字符串时使用的默认组名。
+	DefaultGroup string
 }
 
 type RetryConfig struct {

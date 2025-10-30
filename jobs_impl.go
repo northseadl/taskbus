@@ -36,13 +36,11 @@ func (j *jobs) Enqueue(ctx context.Context, jobName string, payload []byte, opts
 }
 
 func (j *jobs) StartWorkers(ctx context.Context, groups map[string]int, mws ...JobMiddleware) (func(context.Context) error, error) {
-	if len(groups) == 0 {
-		groups = map[string]int{"default": 1}
-	}
-	stops := make([]func(context.Context) error, 0, len(groups))
+	resolved := j.normalizeGroups(groups)
+	stops := make([]func(context.Context) error, 0, len(resolved))
 	wrapped := j.wrap(mws...)
 	finalMW := func(next Handler) Handler { return wrapped(next) }
-	for group := range groups {
+	for group := range resolved {
 		// 使用 RabbitMQ topic 通配符 job.#
 		stop, err := j.c.mq.Consume(ctx, "job.#", group, j.handle, finalMW)
 		if err != nil {
@@ -72,6 +70,48 @@ func (j *jobs) handle(ctx context.Context, msg Message) error {
 	}
 	job := v.(Job)
 	return job.Execute(ctx, msg.Body)
+}
+
+func (j *jobs) normalizeGroups(groups map[string]int) map[string]int {
+	if len(groups) == 0 {
+		groups = map[string]int{"": 1}
+	}
+	resolved := make(map[string]int, len(groups))
+	for name, size := range groups {
+		final := j.resolveGroup(name)
+		if final == "" {
+			final = "default"
+		}
+		if size <= 0 {
+			size = 1
+		}
+		if existing, ok := resolved[final]; ok {
+			if size > existing {
+				resolved[final] = size
+			}
+			continue
+		}
+		resolved[final] = size
+	}
+	return resolved
+}
+
+func (j *jobs) resolveGroup(name string) string {
+	final := name
+	if final == "" {
+		final = j.c.cfg.Job.DefaultGroup
+	}
+	if final == "" {
+		final = "default"
+	}
+	if prefix := j.c.cfg.Job.GroupPrefix; prefix != "" {
+		if final != "" {
+			final = prefix + "." + final
+		} else {
+			final = prefix
+		}
+	}
+	return final
 }
 
 func (j *jobs) wrap(mws ...JobMiddleware) Middleware {

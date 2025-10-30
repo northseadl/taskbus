@@ -2,7 +2,9 @@ module taskbus-example
 
 go 1.24.6
 
-require github.com/northseadl/taskbus v0.3.0
+require github.com/northseadl/taskbus v0.5.0
+
+replace github.com/northseadl/taskbus => ..
 
 require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
