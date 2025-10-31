@@ -41,8 +41,9 @@ func (j *jobs) StartWorkers(ctx context.Context, groups map[string]int, mws ...J
 	wrapped := j.wrap(mws...)
 	finalMW := func(next Handler) Handler { return wrapped(next) }
 	for group := range resolved {
-		// 使用 RabbitMQ topic 通配符 job.#
-		stop, err := j.c.mq.Consume(ctx, "job.#", group, j.handle, finalMW)
+		// 使用 namespaced job 通配符：taskbus.{namespace}.job.#
+		wildcard := "taskbus." + j.c.namespace + ".job.#"
+		stop, err := j.c.mq.Consume(ctx, wildcard, group, j.handle, finalMW)
 		if err != nil {
 			return nil, err
 		}
@@ -56,12 +57,16 @@ func (j *jobs) StartWorkers(ctx context.Context, groups map[string]int, mws ...J
 	}, nil
 }
 
-func (j *jobs) topic(name string) string { return "job." + name }
+func (j *jobs) topic(name string) string { return "taskbus." + j.c.namespace + ".job." + name }
 
 func (j *jobs) handle(ctx context.Context, msg Message) error {
-	// 从 topic 提取 jobName: job.<name>
+	// 从 topic 提取 jobName，兼容旧前缀与新前缀
 	name := msg.Topic
-	if len(name) > 4 && name[:4] == "job." {
+	// 新前缀：taskbus.{namespace}.job.<name>
+	newPrefix := "taskbus." + j.c.namespace + ".job."
+	if len(name) > len(newPrefix) && name[:len(newPrefix)] == newPrefix {
+		name = name[len(newPrefix):]
+	} else if len(name) > 4 && name[:4] == "job." { // 兼容旧前缀
 		name = name[4:]
 	}
 	v, ok := j.reg.Load(name)
@@ -104,7 +109,12 @@ func (j *jobs) resolveGroup(name string) string {
 	if final == "" {
 		final = "default"
 	}
-	if prefix := j.c.cfg.Job.GroupPrefix; prefix != "" {
+	// 若未显式配置 GroupPrefix，使用命名空间作为前缀
+	prefix := j.c.cfg.Job.GroupPrefix
+	if prefix == "" {
+		prefix = j.c.namespace
+	}
+	if prefix != "" {
 		if final != "" {
 			final = prefix + "." + final
 		} else {

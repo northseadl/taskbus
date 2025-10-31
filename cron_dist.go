@@ -136,8 +136,9 @@ func (cd *cronDist) tryLeaderWithRabbit() bool {
 		_ = conn.Close()
 		return false
 	}
-	// 独占队列作为 leader 锁
-	_, err = ch.QueueDeclare("tq.cron.leader", false, true, true, true, nil)
+	// 独占队列作为 leader 锁（基于 namespace 隔离）
+	qname := "taskbus.cron.leader." + cd.c.namespace
+	_, err = ch.QueueDeclare(qname, false, true, true, true, nil)
 	if err != nil {
 		_ = ch.Close()
 		_ = conn.Close()
@@ -228,8 +229,9 @@ func (cd *cronDist) rebuildScheduler() {
 
 func (cd *cronDist) publishFunc(name string) func(context.Context) error {
 	return func(ctx context.Context) error {
-		// 发布到 MQ: cron.<name>
-		return cd.c.mq.Publish(ctx, Message{Topic: "cron." + name, Key: name, Body: nil})
+		// 发布到 MQ: taskbus.{namespace}.cron.<name>
+		topic := "taskbus." + cd.c.namespace + ".cron." + name
+		return cd.c.mq.Publish(ctx, Message{Topic: topic, Key: name, Body: nil})
 	}
 }
 
@@ -238,15 +240,18 @@ func (cd *cronDist) publishFunc(name string) func(context.Context) error {
 func (cd *cronDist) startExecutor(ctx context.Context) (func(context.Context) error, error) {
 	group := cd.c.cfg.Cron.ExecutorGroup
 	if group == "" {
-		group = "cron-exec"
+		group = cd.c.namespace + ".cron-exec"
 	}
-	return cd.c.mq.Consume(ctx, "cron.#", group, cd.execHandle)
+	wildcard := "taskbus." + cd.c.namespace + ".cron.#"
+	return cd.c.mq.Consume(ctx, wildcard, group, cd.execHandle)
 }
 
 func (cd *cronDist) execHandle(ctx context.Context, m Message) error {
 	name := m.Topic
-	if len(name) > 5 && name[:5] == "cron." {
-		name = name[5:]
+	// 从 namespaced topic 提取 cron 名称
+	prefix := "taskbus." + cd.c.namespace + ".cron."
+	if len(name) > len(prefix) && name[:len(prefix)] == prefix {
+		name = name[len(prefix):]
 	}
 	cd.mu.Lock()
 	t, ok := cd.reg[name]

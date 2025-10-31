@@ -2,6 +2,9 @@ package taskbus
 
 import (
 	"context"
+	"fmt"
+	"regexp"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -26,13 +29,29 @@ type Client interface {
 	Cron() Cron
 	// Bus 暴露事件总线。
 	Bus() EventBus
+	// Streams 暴露 Stream 管理器（全局分布式订阅，独立 MQ 实例）
+	Streams() StreamManager
 }
 
 // New 创建 Client 实例。
 func New(ctx context.Context, cfg Config, opts ...Option) (Client, error) {
+	// 校验并应用默认配置
+	if cfg.Namespace == "" && cfg.Job.GroupPrefix != "" {
+		// 兼容旧配置：回退使用 groupPrefix
+		cfg.Namespace = cfg.Job.GroupPrefix
+	}
+	if cfg.Namespace == "" {
+		return nil, fmt.Errorf("config.namespace required")
+	}
+	if !isValidNamespace(cfg.Namespace) {
+		return nil, fmt.Errorf("invalid namespace: %s", cfg.Namespace)
+	}
+	applyDefaultConfig(&cfg)
+
 	c := &client{
-		cfg:    cfg,
-		logger: defaultLogger{},
+		cfg:       cfg,
+		logger:    defaultLogger{},
+		namespace: cfg.Namespace,
 	}
 	if c.cfg.Job.DefaultGroup == "" {
 		c.cfg.Job.DefaultGroup = "default"
@@ -89,6 +108,13 @@ func New(ctx context.Context, cfg Config, opts ...Option) (Client, error) {
 	c.cron = newCron(c)
 	c.bus = newBus(c)
 
+	// 初始化 Stream 管理器
+	sm, err := newStreamManager(cfg, c.logger)
+	if err != nil {
+		return nil, err
+	}
+	c.streams = sm
+
 	// 将幂等中间件装配到默认栈：Jobs、EventBus（若启用）
 	if jobIdem != nil {
 		c.jobs = withDefaultJobMiddleware(c.jobs, jobIdem)
@@ -107,6 +133,10 @@ type client struct {
 	jobs Jobs
 	cron Cron
 	bus  EventBus
+	// namespace 用于前缀化 topic 与锁键
+	namespace string
+	// streams 独立的 Stream 实例集合
+	streams StreamManager
 }
 
 func (c *client) Start(ctx context.Context) error { return nil }
@@ -114,12 +144,16 @@ func (c *client) Close(ctx context.Context) error {
 	if c.mq != nil {
 		_ = c.mq.Close(ctx)
 	}
+	if c.streams != nil {
+		_ = c.streams.Close(ctx)
+	}
 	return nil
 }
-func (c *client) MQ() MQ        { return c.mq }
-func (c *client) Jobs() Jobs    { return c.jobs }
-func (c *client) Cron() Cron    { return c.cron }
-func (c *client) Bus() EventBus { return c.bus }
+func (c *client) MQ() MQ                 { return c.mq }
+func (c *client) Jobs() Jobs             { return c.jobs }
+func (c *client) Cron() Cron             { return c.cron }
+func (c *client) Bus() EventBus          { return c.bus }
+func (c *client) Streams() StreamManager { return c.streams }
 
 // Option 允许注入替换默认行为（如 Logger）。
 type Option func(*client)
@@ -130,5 +164,71 @@ func WithLogger(l Logger) Option {
 		if l != nil {
 			c.logger = l
 		}
+	}
+}
+
+// --- defaults & validation ---
+
+func isValidNamespace(ns string) bool {
+	matched, _ := regexp.MatchString(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`, ns)
+	return matched
+}
+
+func applyDefaultConfig(cfg *Config) {
+	// Job
+	if cfg.Job.DefaultGroup == "" {
+		cfg.Job.DefaultGroup = "default"
+	}
+	if cfg.Job.Retry.Base <= 0 {
+		cfg.Job.Retry.Base = 1 * time.Second
+	}
+	if cfg.Job.Retry.Factor <= 0 {
+		cfg.Job.Retry.Factor = 2.0
+	}
+	if cfg.Job.Retry.MaxRetries <= 0 {
+		cfg.Job.Retry.MaxRetries = 3
+	}
+
+	// MQ defaults
+	if cfg.MQ.Provider == MQProviderRabbitMQ {
+		if cfg.MQ.RabbitMQ.DelayMode == "" {
+			cfg.MQ.RabbitMQ.DelayMode = DelayModeStandard
+		}
+		if cfg.MQ.RabbitMQ.Exchange == "" {
+			cfg.MQ.RabbitMQ.Exchange = fmt.Sprintf("taskbus.%s", cfg.Namespace)
+		}
+		if cfg.MQ.RabbitMQ.DelayedExchange == "" {
+			cfg.MQ.RabbitMQ.DelayedExchange = fmt.Sprintf("taskbus.%s.delayed", cfg.Namespace)
+		}
+		if cfg.MQ.RabbitMQ.Prefetch <= 0 {
+			cfg.MQ.RabbitMQ.Prefetch = 64
+		}
+		if cfg.MQ.RabbitMQ.ConsumerConcurrency <= 0 {
+			cfg.MQ.RabbitMQ.ConsumerConcurrency = 4
+		}
+	}
+	if cfg.MQ.Provider == MQProviderRedis {
+		if cfg.MQ.Redis.ConsumerConcurrency <= 0 {
+			cfg.MQ.Redis.ConsumerConcurrency = 4
+		}
+	}
+
+	// Cron defaults（默认分布式 + 基于 namespace 的锁键）
+	if !cfg.Cron.Distributed {
+		cfg.Cron.Distributed = true
+	}
+	if cfg.Cron.LeaderLockKey == "" {
+		cfg.Cron.LeaderLockKey = fmt.Sprintf("taskbus:cron:%s", cfg.Namespace)
+	}
+	if cfg.Cron.LeaderTTL <= 0 {
+		cfg.Cron.LeaderTTL = 30 * time.Second
+	}
+
+	// EventBus defaults
+	if cfg.EventBus.Mode == "" {
+		cfg.EventBus.Mode = EventBusModeIsolated
+	}
+	if cfg.EventBus.SubscriberConcurrency <= 0 {
+		cfg.EventBus.SubscriberConcurrency = 1
 	}
 }

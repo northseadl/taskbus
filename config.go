@@ -14,11 +14,16 @@ const (
 
 // Config 为包总配置，应用通过 New 传入。
 type Config struct {
-	MQ       MQConfig
-	Job      JobConfig
-	Cron     CronConfig
-	EventBus EventBusConfig
-	Logger   LoggerConfig
+	// Namespace 服务命名空间：用于隔离 Jobs/Cron/EventBus 等组件的 topic/锁键前缀
+	// 建议与服务名一致，例如："chuanggo-core"、"chuanggo-intelligence"
+	Namespace string
+	MQ        MQConfig
+	Job       JobConfig
+	Cron      CronConfig
+	EventBus  EventBusConfig
+	// Stream 为独立于 Namespace 的全局分布式订阅配置（一个实例一个独立 MQ）
+	Stream StreamConfig
+	Logger LoggerConfig
 
 	// Idempotency 可选配置：若提供 KV/Redis，则默认启用 Jobs 与 EventBus 的幂等检查。
 	Idempotency IdempotencyConfig
@@ -85,7 +90,30 @@ type CronConfig struct {
 }
 
 type EventBusConfig struct {
+	// Mode 事件总线模式：isolated（基于 namespace 的隔离）或 global（跨服务共享）
+	Mode EventBusMode
+	// SubscriberConcurrency 订阅者并发度（默认 1）
 	SubscriberConcurrency int
+}
+
+// EventBusMode 定义事件总线模式
+type EventBusMode string
+
+const (
+	EventBusModeIsolated EventBusMode = "isolated"
+	EventBusModeGlobal   EventBusMode = "global"
+)
+
+// StreamConfig 管理多个独立的 Stream 实例（每个实例绑定到一个独立的 MQ 连接或 Redis DB）
+type StreamConfig struct {
+	Streams map[string]StreamInstanceConfig
+}
+
+// StreamInstanceConfig 单个 Stream 的 MQ 配置
+type StreamInstanceConfig struct {
+	Provider MQProvider
+	RabbitMQ RabbitMQConfig
+	Redis    RedisConfig
 }
 
 type LoggerConfig struct {
