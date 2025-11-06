@@ -55,6 +55,7 @@ func (r *rabbitMQAdapter) ensureConnection() error {
 	if r.conn != nil && !r.conn.IsClosed() {
 		return nil
 	}
+	// amqp.Dial 自动支持 amqp:// 和 amqps://
 	conn, err := amqp.Dial(r.cfg.URI)
 	if err != nil {
 		return err
@@ -70,6 +71,7 @@ func (r *rabbitMQAdapter) declareTopology() error {
 	}
 	defer ch.Close()
 	// 普通 topic exchange
+	r.logger.Info(context.Background(), "declare exchange", "exchange", r.cfg.Exchange)
 	if err := ch.ExchangeDeclare(r.cfg.Exchange, "topic", true, false, false, false, nil); err != nil {
 		return err
 	}
@@ -79,6 +81,7 @@ func (r *rabbitMQAdapter) declareTopology() error {
 			return fmt.Errorf("delayed exchange required in standard mode")
 		}
 		args := amqp.Table{"x-delayed-type": "topic"}
+		r.logger.Info(context.Background(), "declare delayed exchange", "exchange", r.cfg.DelayedExchange)
 		if err := ch.ExchangeDeclare(r.cfg.DelayedExchange, "x-delayed-message", true, false, false, false, args); err != nil {
 			return err
 		}
@@ -88,23 +91,43 @@ func (r *rabbitMQAdapter) declareTopology() error {
 
 func (r *rabbitMQAdapter) Publish(ctx context.Context, msg Message) error {
 	if err := r.ensureConnection(); err != nil {
-		return err
+		return fmt.Errorf("rabbitmq connection failed: %w", err)
 	}
 	ch, err := r.conn.Channel()
 	if err != nil {
-		return err
+		return fmt.Errorf("rabbitmq channel creation failed: %w", err)
 	}
 	defer ch.Close()
+	
+	// 监听 Channel 关闭和消息退回（用于检测阿里云 Serverless 的特殊错误）
+	closeChan := ch.NotifyClose(make(chan *amqp.Error, 1))
+	rets := ch.NotifyReturn(make(chan amqp.Return, 1))
+	
 	if r.cfg.Prefetch > 0 {
 		_ = ch.Qos(r.cfg.Prefetch, 0, false)
 	}
-	return ch.PublishWithContext(ctx, r.cfg.Exchange, msg.Topic, false, false, amqp.Publishing{
+	
+	err = ch.PublishWithContext(ctx, r.cfg.Exchange, msg.Topic, true, false, amqp.Publishing{
 		ContentType: "application/octet-stream",
 		MessageId:   msg.Key,
 		Timestamp:   time.Now(),
 		Headers:     stringMapToTable(msg.Headers),
 		Body:        msg.Body,
 	})
+	if err != nil {
+		return fmt.Errorf("rabbitmq publish failed (topic=%s): %w", msg.Topic, err)
+	}
+	
+	// 检查是否有立即错误（Channel 关闭或消息无法路由）
+	select {
+	case ret := <-rets:
+		return fmt.Errorf("message unroutable to topic %s: %s (code=%d)", msg.Topic, ret.ReplyText, ret.ReplyCode)
+	case closeErr := <-closeChan:
+		return fmt.Errorf("channel closed immediately after publish: %w", closeErr)
+	case <-time.After(100 * time.Millisecond):
+		// 发布成功，没有立即错误
+	}
+	return nil
 }
 
 func (r *rabbitMQAdapter) PublishDelay(ctx context.Context, msg Message, delay time.Duration) error {
@@ -127,23 +150,43 @@ func (r *rabbitMQAdapter) PublishDelay(ctx context.Context, msg Message, delay t
 	if r.mode == DelayModeAliyun {
 		// 直接发布到普通交换机，使用 delay 字段
 		headers["delay"] = fmt.Sprintf("%d", ms)
-		return ch.PublishWithContext(ctx, r.cfg.Exchange, msg.Topic, false, false, amqp.Publishing{
+		rets := ch.NotifyReturn(make(chan amqp.Return, 1))
+		err = ch.PublishWithContext(ctx, r.cfg.Exchange, msg.Topic, true, false, amqp.Publishing{
 			ContentType: "application/octet-stream",
 			MessageId:   msg.Key,
 			Timestamp:   time.Now(),
 			Headers:     headers,
 			Body:        msg.Body,
 		})
+		if err != nil {
+			return err
+		}
+		select {
+		case ret := <-rets:
+			r.logger.Error(ctx, "mq return (unroutable)", "exchange", ret.Exchange, "routing_key", ret.RoutingKey, "code", ret.ReplyCode, "text", ret.ReplyText)
+		default:
+		}
+		return nil
 	}
 	// standard: 发布到延时交换机，使用 x-delay
 	headers["x-delay"] = ms
-	return ch.PublishWithContext(ctx, r.cfg.DelayedExchange, msg.Topic, false, false, amqp.Publishing{
+	rets := ch.NotifyReturn(make(chan amqp.Return, 1))
+	err = ch.PublishWithContext(ctx, r.cfg.DelayedExchange, msg.Topic, true, false, amqp.Publishing{
 		ContentType: "application/octet-stream",
 		MessageId:   msg.Key,
 		Timestamp:   time.Now(),
 		Headers:     headers,
 		Body:        msg.Body,
 	})
+	if err != nil {
+		return err
+	}
+	select {
+	case ret := <-rets:
+		r.logger.Error(ctx, "mq return (unroutable)", "exchange", ret.Exchange, "routing_key", ret.RoutingKey, "code", ret.ReplyCode, "text", ret.ReplyText)
+	default:
+	}
+	return nil
 }
 
 func (r *rabbitMQAdapter) Consume(ctx context.Context, topic, group string, handler Handler, mws ...Middleware) (func(context.Context) error, error) {
@@ -165,12 +208,14 @@ func (r *rabbitMQAdapter) Consume(ctx context.Context, topic, group string, hand
 		return nil, err
 	}
 	// 绑定到普通交换机（即时消息）
+	r.logger.Info(ctx, "queue bind", "queue", q.Name, "exchange", r.cfg.Exchange, "binding_key", topic)
 	if err := ch.QueueBind(q.Name, topic, r.cfg.Exchange, false, nil); err != nil {
 		ch.Close()
 		return nil, err
 	}
 	// 绑定到延时交换机（延时消息），仅在 standard 模式
 	if r.mode == DelayModeStandard {
+		r.logger.Info(ctx, "queue bind", "queue", q.Name, "exchange", r.cfg.DelayedExchange, "binding_key", topic)
 		if err := ch.QueueBind(q.Name, topic, r.cfg.DelayedExchange, false, nil); err != nil {
 			ch.Close()
 			return nil, err
@@ -181,6 +226,9 @@ func (r *rabbitMQAdapter) Consume(ctx context.Context, topic, group string, hand
 		ch.Close()
 		return nil, err
 	}
+
+	// 监听 Channel 关闭
+	closeChan := ch.NotifyClose(make(chan *amqp.Error, 1))
 
 	// 组装中间件
 	final := handler
@@ -200,6 +248,11 @@ func (r *rabbitMQAdapter) Consume(ctx context.Context, topic, group string, hand
 		for {
 			select {
 			case <-ctx.Done():
+				wg.Wait()
+				return
+			case err := <-closeChan:
+				// Channel 被服务器关闭（如阿里云 Serverless 的 406/504 错误）
+				r.logger.Error(ctx, "rabbitmq channel closed by server", "queue", q.Name, "error", err.Error())
 				wg.Wait()
 				return
 			case d, ok := <-msgs:

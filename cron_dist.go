@@ -82,6 +82,7 @@ func (cd *cronDist) Start(ctx context.Context) error {
 		return err
 	}
 	cd.execStop = stop
+	cd.c.logger.Info(ctx, "cron executor started", "group", cd.c.cfg.Cron.ExecutorGroup)
 	// 启动 Leader 选举与 Scheduler（仅 Leader 实例）
 	go cd.leaderLoop()
 	return nil
@@ -105,9 +106,11 @@ func (cd *cronDist) leaderLoop() {
 		if cd.tryAcquireLeader() {
 			ctx, cancel := context.WithCancel(context.Background())
 			cd.leaderCancel = cancel
+			cd.c.logger.Info(ctx, "cron leader acquired")
 			cd.startScheduler(ctx)
 			<-ctx.Done()
 			cd.stopScheduler()
+			cd.c.logger.Info(context.Background(), "cron leader released")
 		}
 		time.Sleep(2 * time.Second)
 	}
@@ -211,6 +214,7 @@ func (cd *cronDist) startScheduler(ctx context.Context) {
 		_, _ = cd.cron.AddFunc(t.spec, func() { _ = wrapped(context.Background()) })
 	}
 	cd.cron.Start()
+	cd.c.logger.Info(ctx, "cron scheduler started", "task_count", len(cd.reg))
 }
 
 func (cd *cronDist) stopScheduler() {
@@ -229,9 +233,14 @@ func (cd *cronDist) rebuildScheduler() {
 
 func (cd *cronDist) publishFunc(name string) func(context.Context) error {
 	return func(ctx context.Context) error {
-		// 发布到 MQ: taskbus.{namespace}.cron.<name>
 		topic := "taskbus." + cd.c.namespace + ".cron." + name
-		return cd.c.mq.Publish(ctx, Message{Topic: topic, Key: name, Body: nil})
+		// 必须提供非空消息体（某些 RabbitMQ 实现如阿里云 Serverless 会拒绝空消息）
+		body := []byte("{}")
+		if err := cd.c.mq.Publish(ctx, Message{Topic: topic, Key: name, Body: body}); err != nil {
+			cd.c.logger.Error(ctx, "cron task publish failed", "task", name, "error", err.Error())
+			return err
+		}
+		return nil
 	}
 }
 
@@ -242,8 +251,13 @@ func (cd *cronDist) startExecutor(ctx context.Context) (func(context.Context) er
 	if group == "" {
 		group = cd.c.namespace + ".cron-exec"
 	}
+	// 使用多段通配符 # 匹配所有 cron 任务
 	wildcard := "taskbus." + cd.c.namespace + ".cron.#"
-	return cd.c.mq.Consume(ctx, wildcard, group, cd.execHandle)
+	stopW, err := cd.c.mq.Consume(ctx, wildcard, group, cd.execHandle)
+	if err != nil {
+		return nil, fmt.Errorf("cron executor consume failed: %w", err)
+	}
+	return stopW, nil
 }
 
 func (cd *cronDist) execHandle(ctx context.Context, m Message) error {
@@ -259,6 +273,7 @@ func (cd *cronDist) execHandle(ctx context.Context, m Message) error {
 	if !ok {
 		return fmt.Errorf("cron task not found: %s", name)
 	}
+	// 组装中间件链
 	fn := t.fn
 	for i := len(t.mws) - 1; i >= 0; i-- {
 		fn = t.mws[i](fn)

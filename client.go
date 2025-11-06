@@ -36,15 +36,13 @@ type Client interface {
 // New 创建 Client 实例。
 func New(ctx context.Context, cfg Config, opts ...Option) (Client, error) {
 	// 校验并应用默认配置
-	if cfg.Namespace == "" && cfg.Job.GroupPrefix != "" {
-		// 兼容旧配置：回退使用 groupPrefix
-		cfg.Namespace = cfg.Job.GroupPrefix
-	}
 	if cfg.Namespace == "" {
-		return nil, fmt.Errorf("config.namespace required")
+		// 未配置则回退到默认命名空间，避免 Stream/MQ-only 用法报错
+		cfg.Namespace = "default"
 	}
 	if !isValidNamespace(cfg.Namespace) {
-		return nil, fmt.Errorf("invalid namespace: %s", cfg.Namespace)
+		// 非法时回退默认，避免启动失败
+		cfg.Namespace = "default"
 	}
 	applyDefaultConfig(&cfg)
 
@@ -194,11 +192,12 @@ func applyDefaultConfig(cfg *Config) {
 		if cfg.MQ.RabbitMQ.DelayMode == "" {
 			cfg.MQ.RabbitMQ.DelayMode = DelayModeStandard
 		}
+		// 提供统一的 Exchange 默认值，应用无需配置
 		if cfg.MQ.RabbitMQ.Exchange == "" {
-			cfg.MQ.RabbitMQ.Exchange = fmt.Sprintf("taskbus.%s", cfg.Namespace)
+			cfg.MQ.RabbitMQ.Exchange = "taskbus.events"
 		}
 		if cfg.MQ.RabbitMQ.DelayedExchange == "" {
-			cfg.MQ.RabbitMQ.DelayedExchange = fmt.Sprintf("taskbus.%s.delayed", cfg.Namespace)
+			cfg.MQ.RabbitMQ.DelayedExchange = "taskbus.events.delayed"
 		}
 		if cfg.MQ.RabbitMQ.Prefetch <= 0 {
 			cfg.MQ.RabbitMQ.Prefetch = 64
