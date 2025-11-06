@@ -134,9 +134,13 @@ func (j *jobs) wrap(mws ...JobMiddleware) Middleware {
 			final = mws[i](final)
 		}
 		return func(ctx context.Context, m Message) error {
-			// topic -> jobName
+			// topic -> jobName，正确提取job名称
 			name := m.Topic
-			if len(name) > 4 && name[:4] == "job." {
+			// 新前缀：taskbus.{namespace}.job.<name>
+			newPrefix := "taskbus." + j.c.namespace + ".job."
+			if len(name) > len(newPrefix) && name[:len(newPrefix)] == newPrefix {
+				name = name[len(newPrefix):]
+			} else if len(name) > 4 && name[:4] == "job." { // 兼容旧前缀
 				name = name[4:]
 			}
 			return final(ctx, name, m.Body)

@@ -127,7 +127,7 @@ func (r *rabbitMQAdapter) Publish(ctx context.Context, msg Message) error {
 	case <-time.After(100 * time.Millisecond):
 		// 发布成功，没有立即错误
 	}
-	return nil
+	return err
 }
 
 func (r *rabbitMQAdapter) PublishDelay(ctx context.Context, msg Message, delay time.Duration) error {
