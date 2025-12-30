@@ -28,14 +28,18 @@ func main() {
 	}
 
 	cli, err := taskbus.New(ctx, cfg)
-	if err != nil { panic(err) }
+	if err != nil {
+		panic(err)
+	}
 	defer func() { _ = cli.Close(ctx) }()
 
 	stop, err := cli.Bus().Subscribe("demo.topic", "g1", nil, func(ctx context.Context, e taskbus.Event) error {
 		fmt.Printf("[Bus] 收到: type=%s subject=%s payload=%s\n", e.Type, e.Subject, string(e.Payload))
 		return nil
 	})
-	if err != nil { panic(err) }
+	if err != nil {
+		panic(err)
+	}
 	defer func() { _ = stop(ctx) }()
 
 	_ = cli.Bus().Publish(ctx, taskbus.Event{Topic: "demo.topic", Type: "greeting", Subject: "u1", Payload: []byte("hello")})
@@ -43,4 +47,3 @@ func main() {
 	time.Sleep(1 * time.Second)
 	fmt.Println("[Bus] 结束")
 }
-

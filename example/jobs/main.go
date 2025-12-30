@@ -40,13 +40,17 @@ func main() {
 	}
 
 	cli, err := taskbus.New(ctx, cfg)
-	if err != nil { panic(err) }
+	if err != nil {
+		panic(err)
+	}
 	defer func() { _ = cli.Close(ctx) }()
 
 	// 注册 Job 并启动 Worker
 	cli.Jobs().Register(echoJob{})
 	stop, err := cli.Jobs().StartWorkers(ctx, map[string]int{"default": 1})
-	if err != nil { panic(err) }
+	if err != nil {
+		panic(err)
+	}
 	defer func() { _ = stop(ctx) }()
 
 	// 入队 3 条任务
@@ -58,4 +62,3 @@ func main() {
 	time.Sleep(2 * time.Second)
 	fmt.Println("[Jobs] 结束")
 }
-

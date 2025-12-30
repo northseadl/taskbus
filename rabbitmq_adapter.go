@@ -32,7 +32,7 @@ func newRabbitMQAdapterWithMode(cfg RabbitMQConfig, mode DelayMode, retry RetryC
 	if mode == DelayModeStandard && cfg.DelayedExchange == "" {
 		return nil, fmt.Errorf("delayed exchange required in standard mode")
 	}
-	// dd dddddd
+	// 重试参数默认值
 	if retry.Base <= 0 {
 		retry.Base = time.Second
 	}
@@ -98,15 +98,15 @@ func (r *rabbitMQAdapter) Publish(ctx context.Context, msg Message) error {
 		return fmt.Errorf("rabbitmq channel creation failed: %w", err)
 	}
 	defer ch.Close()
-	
+
 	// 监听 Channel 关闭和消息退回（用于检测阿里云 Serverless 的特殊错误）
 	closeChan := ch.NotifyClose(make(chan *amqp.Error, 1))
 	rets := ch.NotifyReturn(make(chan amqp.Return, 1))
-	
+
 	if r.cfg.Prefetch > 0 {
 		_ = ch.Qos(r.cfg.Prefetch, 0, false)
 	}
-	
+
 	err = ch.PublishWithContext(ctx, r.cfg.Exchange, msg.Topic, true, false, amqp.Publishing{
 		ContentType: "application/octet-stream",
 		MessageId:   msg.Key,
@@ -117,7 +117,7 @@ func (r *rabbitMQAdapter) Publish(ctx context.Context, msg Message) error {
 	if err != nil {
 		return fmt.Errorf("rabbitmq publish failed (topic=%s): %w", msg.Topic, err)
 	}
-	
+
 	// 检查是否有立即错误（Channel 关闭或消息无法路由）
 	select {
 	case ret := <-rets:

@@ -6,6 +6,7 @@ import (
 	"sync"
 )
 
+// jobs 实现 Jobs 接口，提供任务注册、入队与 Worker 管理。
 type jobs struct {
 	c   *client
 	reg sync.Map // name -> Job
@@ -13,12 +14,14 @@ type jobs struct {
 
 func newJobs(c *client) Jobs { return &jobs{c: c} }
 
+// Register 注册一个 Job 实现。
 func (j *jobs) Register(job Job) {
 	if job != nil {
 		j.reg.Store(job.Name(), job)
 	}
 }
 
+// Enqueue 将任务入队。
 func (j *jobs) Enqueue(ctx context.Context, jobName string, payload []byte, opts ...EnqueueOption) error {
 	if jobName == "" {
 		return fmt.Errorf("job name empty")
@@ -35,15 +38,17 @@ func (j *jobs) Enqueue(ctx context.Context, jobName string, payload []byte, opts
 	return j.c.mq.Publish(ctx, msg)
 }
 
+// StartWorkers 启动 Worker 消费任务。
 func (j *jobs) StartWorkers(ctx context.Context, groups map[string]int, mws ...JobMiddleware) (func(context.Context) error, error) {
 	resolved := j.normalizeGroups(groups)
 	stops := make([]func(context.Context) error, 0, len(resolved))
-	wrapped := j.wrap(mws...)
-	finalMW := func(next Handler) Handler { return wrapped(next) }
+
+	// 构建中间件包装的 handler
+	wrappedHandler := j.buildHandler(mws...)
+
 	for group := range resolved {
-		// 使用 namespaced job 通配符：taskbus.{namespace}.job.#
-		wildcard := "taskbus." + j.c.namespace + ".job.#"
-		stop, err := j.c.mq.Consume(ctx, wildcard, group, j.handle, finalMW)
+		wildcard := buildWildcardTopic(j.c.namespace, "job")
+		stop, err := j.c.mq.Consume(ctx, wildcard, group, wrappedHandler)
 		if err != nil {
 			return nil, err
 		}
@@ -57,24 +62,56 @@ func (j *jobs) StartWorkers(ctx context.Context, groups map[string]int, mws ...J
 	}, nil
 }
 
-func (j *jobs) topic(name string) string { return "taskbus." + j.c.namespace + ".job." + name }
+// topic 构建任务的完整 topic 名称。
+func (j *jobs) topic(name string) string {
+	return buildTopic(j.c.namespace, "job", name)
+}
 
-func (j *jobs) handle(ctx context.Context, msg Message) error {
-	// 从 topic 提取 jobName，兼容旧前缀与新前缀
-	name := msg.Topic
-	// 新前缀：taskbus.{namespace}.job.<name>
-	newPrefix := "taskbus." + j.c.namespace + ".job."
-	if len(name) > len(newPrefix) && name[:len(newPrefix)] == newPrefix {
-		name = name[len(newPrefix):]
-	} else if len(name) > 4 && name[:4] == "job." { // 兼容旧前缀
-		name = name[4:]
+// extractJobName 从 topic 中提取 job 名称。
+func (j *jobs) extractJobName(topic string) string {
+	prefix := buildTopicPrefix(j.c.namespace, "job")
+	name := trimTopicPrefix(topic, prefix)
+	// 兼容旧前缀 "job.<name>"
+	if name == topic && len(name) > 4 && name[:4] == "job." {
+		return name[4:]
 	}
+	return name
+}
+
+// handle 执行 Job。
+func (j *jobs) handle(ctx context.Context, msg Message) error {
+	name := j.extractJobName(msg.Topic)
 	v, ok := j.reg.Load(name)
 	if !ok {
 		return fmt.Errorf("job not registered: %s", name)
 	}
 	job := v.(Job)
 	return job.Execute(ctx, msg.Body)
+}
+
+// buildHandler 构建带中间件的 Handler。
+// 修复：正确链接中间件，不再忽略 next Handler。
+func (j *jobs) buildHandler(mws ...JobMiddleware) Handler {
+	// 最终执行的 JobHandler
+	finalJobHandler := func(ctx context.Context, jobName string, payload []byte) error {
+		v, ok := j.reg.Load(jobName)
+		if !ok {
+			return fmt.Errorf("job not registered: %s", jobName)
+		}
+		job := v.(Job)
+		return job.Execute(ctx, payload)
+	}
+
+	// 逆序包装中间件
+	for i := len(mws) - 1; i >= 0; i-- {
+		finalJobHandler = mws[i](finalJobHandler)
+	}
+
+	// 返回 MQ Handler，将 Message 转换为 JobHandler 调用
+	return func(ctx context.Context, m Message) error {
+		jobName := j.extractJobName(m.Topic)
+		return finalJobHandler(ctx, jobName, m.Body)
+	}
 }
 
 func (j *jobs) normalizeGroups(groups map[string]int) map[string]int {
@@ -124,30 +161,7 @@ func (j *jobs) resolveGroup(name string) string {
 	return final
 }
 
-func (j *jobs) wrap(mws ...JobMiddleware) Middleware {
-	return func(next Handler) Handler {
-		// 转换为 JobHandler 中间件以复用
-		final := func(ctx context.Context, jobName string, payload []byte) error {
-			return j.handle(ctx, Message{Topic: j.topic(jobName), Body: payload})
-		}
-		for i := len(mws) - 1; i >= 0; i-- {
-			final = mws[i](final)
-		}
-		return func(ctx context.Context, m Message) error {
-			// topic -> jobName，正确提取job名称
-			name := m.Topic
-			// 新前缀：taskbus.{namespace}.job.<name>
-			newPrefix := "taskbus." + j.c.namespace + ".job."
-			if len(name) > len(newPrefix) && name[:len(newPrefix)] == newPrefix {
-				name = name[len(newPrefix):]
-			} else if len(name) > 4 && name[:4] == "job." { // 兼容旧前缀
-				name = name[4:]
-			}
-			return final(ctx, name, m.Body)
-		}
-	}
-}
-
+// copyHeaders 复制 headers map。
 func copyHeaders(h map[string]string) map[string]string {
 	if len(h) == 0 {
 		return map[string]string{}
