@@ -46,13 +46,18 @@ func (j *jobs) StartWorkers(ctx context.Context, groups map[string]int, mws ...J
 	// 构建中间件包装的 handler
 	wrappedHandler := j.buildHandler(mws...)
 
-	for group := range resolved {
+	for group, size := range resolved {
 		wildcard := buildWildcardTopic(j.c.namespace, "job")
-		stop, err := j.c.mq.Consume(ctx, wildcard, group, wrappedHandler)
-		if err != nil {
-			return nil, err
+		for i := 0; i < size; i++ {
+			stop, err := j.c.mq.Consume(ctx, wildcard, group, wrappedHandler)
+			if err != nil {
+				for _, s := range stops {
+					_ = s(ctx)
+				}
+				return nil, err
+			}
+			stops = append(stops, stop)
 		}
-		stops = append(stops, stop)
 	}
 	return func(ctx context.Context) error {
 		for _, s := range stops {
@@ -110,6 +115,7 @@ func (j *jobs) buildHandler(mws ...JobMiddleware) Handler {
 	// 返回 MQ Handler，将 Message 转换为 JobHandler 调用
 	return func(ctx context.Context, m Message) error {
 		jobName := j.extractJobName(m.Topic)
+		ctx = withJobKey(ctx, m.Key)
 		return finalJobHandler(ctx, jobName, m.Body)
 	}
 }

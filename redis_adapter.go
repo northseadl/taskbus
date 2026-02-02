@@ -9,6 +9,8 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"sync/atomic"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -21,14 +23,18 @@ type redisAdapter struct {
 	cfg          RedisConfig
 	retry        RetryConfig
 	logger       Logger
-	consumerName string
+	consumerBase string
+	consumerSeq  atomic.Uint64
 
+	closeOnce sync.Once
 	stopCh chan struct{}
 	wg     sync.WaitGroup
 }
 
 const (
-	redisDelayZKey = "tq:delay"
+	redisDelayZKey      = "tq:delay"
+	redisClaimMinIdle   = 30 * time.Second
+	redisClaimInterval  = 2 * time.Second
 )
 
 type delayItem struct {
@@ -42,11 +48,11 @@ func newRedisAdapter(cfg RedisConfig, retry RetryConfig, logger Logger) (MQ, err
 	if cfg.Addr == "" {
 		return nil, fmt.Errorf("redis addr empty")
 	}
-	consumerName := ""
+	consumerBase := ""
 	if hn, _ := os.Hostname(); hn != "" {
-		consumerName = fmt.Sprintf("%s-%d", hn, os.Getpid())
+		consumerBase = fmt.Sprintf("%s-%d", hn, os.Getpid())
 	} else {
-		consumerName = fmt.Sprintf("c-%d", os.Getpid())
+		consumerBase = fmt.Sprintf("c-%d", os.Getpid())
 	}
 	// 重试参数默认值保护
 	if retry.Base <= 0 {
@@ -57,9 +63,41 @@ func newRedisAdapter(cfg RedisConfig, retry RetryConfig, logger Logger) (MQ, err
 	}
 
 	rdb := redis.NewClient(&redis.Options{Addr: cfg.Addr, Username: cfg.Username, Password: cfg.Password, DB: cfg.DB})
-	ad := &redisAdapter{cfg: cfg, retry: retry, logger: logger, rdb: rdb, consumerName: consumerName, stopCh: make(chan struct{})}
+	ad := &redisAdapter{cfg: cfg, retry: retry, logger: logger, rdb: rdb, consumerBase: consumerBase, stopCh: make(chan struct{})}
 	ad.startDelayScheduler()
 	return ad, nil
+}
+
+func (r *redisAdapter) nextConsumerName() string {
+	n := r.consumerSeq.Add(1)
+	return fmt.Sprintf("%s-%d", r.consumerBase, n)
+}
+
+func redisStreamForTopic(topic string) string {
+	if !strings.HasPrefix(topic, "taskbus.") {
+		return topic
+	}
+	rest := strings.TrimPrefix(topic, "taskbus.")
+	parts := strings.Split(rest, ".")
+	if len(parts) < 2 {
+		return topic
+	}
+	if isComponentToken(parts[0]) {
+		return "taskbus." + parts[0]
+	}
+	if len(parts) >= 2 && isComponentToken(parts[1]) {
+		return "taskbus." + parts[0] + "." + parts[1]
+	}
+	return topic
+}
+
+func isComponentToken(s string) bool {
+	switch s {
+	case "job", "event", "cron":
+		return true
+	default:
+		return false
+	}
 }
 
 func (r *redisAdapter) startDelayScheduler() {
@@ -105,8 +143,10 @@ func (r *redisAdapter) Consume(ctx context.Context, topic, group string, handler
 	if group == "" {
 		group = "default"
 	}
+	stream := redisStreamForTopic(topic)
+	pattern := topic
 	// 确保 group 存在，使用 "0" 从头开始读取
-	_ = r.rdb.XGroupCreateMkStream(ctx, topic, group, "0").Err()
+	_ = r.rdb.XGroupCreateMkStream(ctx, stream, group, "0").Err()
 	final := handler
 	for i := len(mws) - 1; i >= 0; i-- {
 		final = mws[i](final)
@@ -114,25 +154,96 @@ func (r *redisAdapter) Consume(ctx context.Context, topic, group string, handler
 
 	done := make(chan struct{})
 	cctx, cancel := context.WithCancel(ctx)
+	consumerName := r.nextConsumerName()
 	r.wg.Add(1)
 	go func() {
-		defer func() { r.wg.Done(); close(done) }()
+		defer r.wg.Done()
 		concurrency := r.cfg.ConsumerConcurrency
 		if concurrency <= 0 {
 			concurrency = 1
 		}
 		sem := make(chan struct{}, concurrency)
+		var procWG sync.WaitGroup
+		defer func() {
+			procWG.Wait()
+			close(done)
+		}()
+		lastClaim := time.Time{}
+		claimStart := "0-0"
+		autoClaim := true
+
+		dispatch := func(m redis.XMessage) {
+			sem <- struct{}{}
+			procWG.Add(1)
+			go func(m redis.XMessage) {
+				defer func() { <-sem; procWG.Done() }()
+				msg := r.decodeXMessage(stream, m)
+				if !matchTopic(pattern, msg.Topic) {
+					_, _ = r.rdb.XAck(cctx, stream, group, m.ID).Result()
+					return
+				}
+				if err := final(cctx, msg); err == nil {
+					_, _ = r.rdb.XAck(cctx, stream, group, m.ID).Result()
+				} else {
+					// 失败：统一应用层重试（PublishDelay）+ 成功后 ACK；发布失败则不 ACK，待后续重试
+					attempt := 0
+					if s, ok := msg.Headers["x-retry-count"]; ok {
+						if n, e := strconv.Atoi(s); e == nil {
+							attempt = n
+						}
+					}
+					nextAttempt := attempt + 1
+					if nextAttempt <= r.retry.MaxRetries {
+						h := copyHeaders(msg.Headers)
+						h["x-retry-count"] = strconv.Itoa(nextAttempt)
+						delay := time.Duration(float64(r.retry.Base) * math.Pow(r.retry.Factor, float64(nextAttempt-1)))
+						if err := r.PublishDelay(cctx, Message{Topic: msg.Topic, Key: msg.Key, Body: msg.Body, Headers: h}, delay); err == nil {
+							_, _ = r.rdb.XAck(cctx, stream, group, m.ID).Result()
+							return
+						}
+					}
+					// 超过最大重试或发布失败：不再重投（若未超出则因发布失败而不ACK以避免丢失）；超过最大重试则 ACK
+					if nextAttempt > r.retry.MaxRetries {
+						_, _ = r.rdb.XAck(cctx, stream, group, m.ID).Result()
+					}
+				}
+			}(m)
+		}
 		for {
 			select {
 			case <-cctx.Done():
 				return
 			default:
 			}
+			if autoClaim && time.Since(lastClaim) >= redisClaimInterval {
+				lastClaim = time.Now()
+				msgs, next, err := r.rdb.XAutoClaim(cctx, &redis.XAutoClaimArgs{
+					Stream:   stream,
+					Group:    group,
+					Consumer: consumerName,
+					MinIdle:  redisClaimMinIdle,
+					Start:    claimStart,
+					Count:    int64(concurrency),
+				}).Result()
+				if err != nil {
+					if strings.Contains(err.Error(), "unknown command") {
+						autoClaim = false
+					}
+				} else {
+					claimStart = next
+					if len(msgs) > 0 {
+						for _, xmsg := range msgs {
+							dispatch(xmsg)
+						}
+						continue
+					}
+				}
+			}
 			// 2) 读取新消息（>）
 			res, err := r.rdb.XReadGroup(cctx, &redis.XReadGroupArgs{
 				Group:    group,
-				Consumer: r.consumerName,
-				Streams:  []string{topic, ">"},
+				Consumer: consumerName,
+				Streams:  []string{stream, ">"},
 				Count:    int64(concurrency),
 				Block:    2 * time.Second,
 			}).Result()
@@ -146,36 +257,7 @@ func (r *redisAdapter) Consume(ctx context.Context, topic, group string, handler
 			}
 			for _, str := range res {
 				for _, xmsg := range str.Messages {
-					sem <- struct{}{}
-					go func(m redis.XMessage) {
-						defer func() { <-sem }()
-						msg := r.decodeXMessage(topic, m)
-						if err := final(cctx, msg); err == nil {
-							_, _ = r.rdb.XAck(cctx, topic, group, m.ID).Result()
-						} else {
-							// 失败：统一应用层重试（PublishDelay）+ 成功后 ACK；发布失败则不 ACK，待后续重试
-							attempt := 0
-							if s, ok := msg.Headers["x-retry-count"]; ok {
-								if n, e := strconv.Atoi(s); e == nil {
-									attempt = n
-								}
-							}
-							nextAttempt := attempt + 1
-							if nextAttempt <= r.retry.MaxRetries {
-								h := copyHeaders(msg.Headers)
-								h["x-retry-count"] = strconv.Itoa(nextAttempt)
-								delay := time.Duration(float64(r.retry.Base) * math.Pow(r.retry.Factor, float64(nextAttempt-1)))
-								if err := r.PublishDelay(cctx, Message{Topic: msg.Topic, Key: msg.Key, Body: msg.Body, Headers: h}, delay); err == nil {
-									_, _ = r.rdb.XAck(cctx, topic, group, m.ID).Result()
-									return
-								}
-							}
-							// 超过最大重试或发布失败：不再重投（若未超出则因发布失败而不ACK以避免丢失）；超过最大重试则 ACK
-							if nextAttempt > r.retry.MaxRetries {
-								_, _ = r.rdb.XAck(cctx, topic, group, m.ID).Result()
-							}
-						}
-					}(xmsg)
+					dispatch(xmsg)
 				}
 			}
 		}
@@ -193,27 +275,35 @@ func (r *redisAdapter) Consume(ctx context.Context, topic, group string, handler
 }
 
 func (r *redisAdapter) Close(ctx context.Context) error {
-	close(r.stopCh)
+	r.closeOnce.Do(func() { close(r.stopCh) })
 	done := make(chan struct{})
 	go func() { r.wg.Wait(); close(done) }()
 	select {
 	case <-done:
-	default:
+	case <-ctx.Done():
+		_ = r.rdb.Close()
+		return ctx.Err()
 	}
 	return r.rdb.Close()
 }
 
 func (r *redisAdapter) publishStream(ctx context.Context, msg Message) error {
-	fields := map[string]interface{}{"key": msg.Key, "body": base64.StdEncoding.EncodeToString(msg.Body)}
+	stream := redisStreamForTopic(msg.Topic)
+	fields := map[string]interface{}{
+		"key":   msg.Key,
+		"body":  base64.StdEncoding.EncodeToString(msg.Body),
+		"topic": msg.Topic,
+	}
 	for k, v := range msg.Headers {
 		fields["h:"+k] = v
 	}
-	return r.rdb.XAdd(ctx, &redis.XAddArgs{Stream: msg.Topic, Values: fields}).Err()
+	return r.rdb.XAdd(ctx, &redis.XAddArgs{Stream: stream, Values: fields}).Err()
 }
 
 func (r *redisAdapter) decodeXMessage(topic string, xm redis.XMessage) Message {
 	var key string
 	var body []byte
+	var rawTopic string
 	headers := make(map[string]string)
 	for k, v := range xm.Values {
 		switch k {
@@ -223,6 +313,8 @@ func (r *redisAdapter) decodeXMessage(topic string, xm redis.XMessage) Message {
 			if s, ok := v.(string); ok {
 				body, _ = base64.StdEncoding.DecodeString(s)
 			}
+		case "topic":
+			rawTopic, _ = v.(string)
 		default:
 			if len(k) > 2 && k[:2] == "h:" {
 				if s, ok := v.(string); ok {
@@ -231,5 +323,8 @@ func (r *redisAdapter) decodeXMessage(topic string, xm redis.XMessage) Message {
 			}
 		}
 	}
-	return Message{Topic: topic, Key: key, Body: body, Headers: headers}
+	if rawTopic == "" {
+		rawTopic = topic
+	}
+	return Message{Topic: rawTopic, Key: key, Body: body, Headers: headers}
 }

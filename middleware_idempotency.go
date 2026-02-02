@@ -73,7 +73,8 @@ func NewJobIdempotencyMiddleware(cfg IdempotencyConfig) JobMiddleware {
 	mw := NewIdempotencyMiddleware(cfg)
 	return func(next JobHandler) JobHandler {
 		return func(ctx context.Context, jobName string, payload []byte) error {
-			m := Message{Topic: "job." + jobName, Key: "", Body: payload}
+			key := jobKeyFromContext(ctx)
+			m := Message{Topic: "job." + jobName, Key: key, Body: payload}
 			// 允许 KeyFunc 使用 Message 内容来定制幂等 key
 			h := func(context.Context, Message) error { return next(ctx, jobName, payload) }
 			return mw(h)(ctx, m)

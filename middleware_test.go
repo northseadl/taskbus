@@ -240,6 +240,35 @@ func TestJobIdempotencyMiddleware(t *testing.T) {
 	}
 }
 
+func TestJobIdempotencyMiddleware_ContextKey(t *testing.T) {
+	kv := newMockKV()
+	cfg := IdempotencyConfig{
+		KV:     kv,
+		Prefix: "test:job:idem",
+		TTL:    time.Hour,
+		KeyFunc: func(ctx context.Context, m Message) (string, error) {
+			return m.Key, nil
+		},
+	}
+
+	mw := NewJobIdempotencyMiddleware(cfg)
+	execCount := 0
+	handler := func(ctx context.Context, jobName string, payload []byte) error {
+		execCount++
+		return nil
+	}
+
+	wrapped := mw(handler)
+	ctx := withJobKey(context.Background(), "job-key-1")
+
+	_ = wrapped(ctx, "test-job", []byte("payload-1"))
+	_ = wrapped(ctx, "test-job", []byte("payload-2"))
+
+	if execCount != 1 {
+		t.Errorf("execCount = %d, want 1 (same context key)", execCount)
+	}
+}
+
 func TestRedisKV(t *testing.T) {
 	// RedisKV 结构体测试（不依赖真实 Redis）
 	// 这里只测试结构是否正确实现了 KV 接口

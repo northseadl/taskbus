@@ -53,7 +53,28 @@ func (b *bus) Subscribe(topic, group string, filter Filter, handler func(context
 
 	// 订阅时对 topic 做前缀化
 	subTopic := b.buildEventTopic(topic)
-	return b.c.mq.Consume(context.Background(), subTopic, group, finalHandler)
+
+	concurrency := b.c.cfg.EventBus.SubscriberConcurrency
+	if concurrency <= 0 {
+		concurrency = 1
+	}
+	stops := make([]func(context.Context) error, 0, concurrency)
+	for i := 0; i < concurrency; i++ {
+		stop, err := b.c.mq.Consume(context.Background(), subTopic, group, finalHandler)
+		if err != nil {
+			for _, s := range stops {
+				_ = s(context.Background())
+			}
+			return nil, err
+		}
+		stops = append(stops, stop)
+	}
+	return func(ctx context.Context) error {
+		for _, s := range stops {
+			_ = s(ctx)
+		}
+		return nil
+	}, nil
 }
 
 // buildEventHandler 构建带中间件的事件处理器。

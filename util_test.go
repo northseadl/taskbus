@@ -179,3 +179,33 @@ func TestBuildWildcardTopic(t *testing.T) {
 		})
 	}
 }
+
+func TestMatchTopic(t *testing.T) {
+	tests := []struct {
+		name    string
+		pattern string
+		topic   string
+		want    bool
+	}{
+		{name: "exact match", pattern: "a.b.c", topic: "a.b.c", want: true},
+		{name: "exact mismatch", pattern: "a.b.c", topic: "a.b.d", want: false},
+		{name: "star matches one", pattern: "a.*.c", topic: "a.b.c", want: true},
+		{name: "star does not match empty", pattern: "a.*.c", topic: "a.c", want: false},
+		{name: "hash matches many", pattern: "a.#", topic: "a.b.c", want: true},
+		{name: "hash matches zero", pattern: "a.#", topic: "a", want: true},
+		{name: "hash middle", pattern: "a.#.c", topic: "a.b.c", want: true},
+		{name: "hash middle mismatch", pattern: "a.#.c", topic: "a.b.d", want: false},
+		{name: "hash only", pattern: "#", topic: "a.b.c", want: true},
+		{name: "empty pattern", pattern: "", topic: "a", want: false},
+		{name: "empty topic", pattern: "a", topic: "", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := matchTopic(tt.pattern, tt.topic)
+			if got != tt.want {
+				t.Errorf("matchTopic(%q, %q) = %v, want %v", tt.pattern, tt.topic, got, tt.want)
+			}
+		})
+	}
+}

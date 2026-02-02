@@ -12,6 +12,8 @@ import (
 	cronv3 "github.com/robfig/cron/v3"
 )
 
+var redisLockReleaseScript = redis.NewScript(`if redis.call("GET", KEYS[1]) == ARGV[1] then return redis.call("DEL", KEYS[1]) else return 0 end`)
+
 // cronDist 基于 MQ 的分布式 Cron：Scheduler + Executor
 // - Scheduler: 仅 Leader 实例运行，按 spec 将触发事件发布到 MQ
 // - Executor: 全部实例订阅 cron 任务，按收到的任务名称执行本地注册的 fn
@@ -25,6 +27,7 @@ type cronDist struct {
 	leaderCtx    context.Context    // Leader 上下文
 	leaderCancel context.CancelFunc // Leader 取消函数
 	execStop     func(context.Context) error
+	stopOnce     sync.Once
 
 	// 调度器状态
 	cron *cronv3.Cron
@@ -102,7 +105,7 @@ func (cd *cronDist) Start(ctx context.Context) error {
 // Stop 停止 Cron 服务。
 func (cd *cronDist) Stop(ctx context.Context) error {
 	// 发送停止信号
-	close(cd.stopCh)
+	cd.stopOnce.Do(func() { close(cd.stopCh) })
 
 	// 取消 Leader 上下文
 	cd.mu.Lock()
@@ -257,8 +260,8 @@ func (cd *cronDist) tryLeaderWithRedis(parentCtx context.Context) (context.Conte
 		for {
 			select {
 			case <-leaderCtx.Done():
-				// 释放锁
-				_ = rc.Del(context.Background(), key).Err()
+				// 释放锁（仅当仍持有）
+				_ = releaseRedisLock(context.Background(), rc, key, leaderID)
 				return
 			case <-ticker.C:
 				// 续租前检查是否仍是 Leader
@@ -286,6 +289,13 @@ func (cd *cronDist) newRedisClient() *redis.Client {
 		Password: cd.c.cfg.MQ.Redis.Password,
 		DB:       cd.c.cfg.MQ.Redis.DB,
 	})
+}
+
+func releaseRedisLock(ctx context.Context, rc *redis.Client, key, value string) error {
+	if rc == nil {
+		return nil
+	}
+	return redisLockReleaseScript.Run(ctx, rc, []string{key}, value).Err()
 }
 
 // hostname 返回主机名，失败返回 "unknown"。

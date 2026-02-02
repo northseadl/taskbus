@@ -97,6 +97,17 @@ func TestApplyDefaultConfig(t *testing.T) {
 		t.Errorf("Cron.LeaderTTL = %v, want 30s", cfg.Cron.LeaderTTL)
 	}
 
+	// MQ retry defaults
+	if cfg.MQ.Retry.Base != cfg.Job.Retry.Base {
+		t.Errorf("MQ.Retry.Base = %v, want %v", cfg.MQ.Retry.Base, cfg.Job.Retry.Base)
+	}
+	if cfg.MQ.Retry.Factor != cfg.Job.Retry.Factor {
+		t.Errorf("MQ.Retry.Factor = %v, want %v", cfg.MQ.Retry.Factor, cfg.Job.Retry.Factor)
+	}
+	if cfg.MQ.Retry.MaxRetries != cfg.Job.Retry.MaxRetries {
+		t.Errorf("MQ.Retry.MaxRetries = %d, want %d", cfg.MQ.Retry.MaxRetries, cfg.Job.Retry.MaxRetries)
+	}
+
 	// EventBus defaults
 	if cfg.EventBus.Mode != EventBusModeIsolated {
 		t.Errorf("EventBus.Mode = %s, want isolated", cfg.EventBus.Mode)

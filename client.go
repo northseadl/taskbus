@@ -187,6 +187,17 @@ func applyDefaultConfig(cfg *Config) {
 		cfg.Job.Retry.MaxRetries = 3
 	}
 
+	// MQ retry defaults (fallback to Job retry when unset)
+	if cfg.MQ.Retry.Base <= 0 {
+		cfg.MQ.Retry.Base = cfg.Job.Retry.Base
+	}
+	if cfg.MQ.Retry.Factor <= 0 {
+		cfg.MQ.Retry.Factor = cfg.Job.Retry.Factor
+	}
+	if cfg.MQ.Retry.MaxRetries <= 0 {
+		cfg.MQ.Retry.MaxRetries = cfg.Job.Retry.MaxRetries
+	}
+
 	// MQ defaults
 	if cfg.MQ.Provider == MQProviderRabbitMQ {
 		if cfg.MQ.RabbitMQ.DelayMode == "" {

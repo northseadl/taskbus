@@ -28,3 +28,47 @@ func buildTopic(namespace, component, name string) string {
 func buildWildcardTopic(namespace, component string) string {
 	return buildTopicPrefix(namespace, component) + "#"
 }
+
+// matchTopic 按 RabbitMQ topic 语义匹配（* 单词，# 多词）。
+func matchTopic(pattern, topic string) bool {
+	if pattern == topic {
+		return true
+	}
+	if pattern == "" || topic == "" {
+		return pattern == topic
+	}
+	if !strings.ContainsAny(pattern, "*#") {
+		return false
+	}
+	p := strings.Split(pattern, ".")
+	t := strings.Split(topic, ".")
+	return matchTopicTokens(p, t)
+}
+
+func matchTopicTokens(pattern, topic []string) bool {
+	if len(pattern) == 0 {
+		return len(topic) == 0
+	}
+	switch pattern[0] {
+	case "#":
+		if len(pattern) == 1 {
+			return true
+		}
+		for i := 0; i <= len(topic); i++ {
+			if matchTopicTokens(pattern[1:], topic[i:]) {
+				return true
+			}
+		}
+		return false
+	case "*":
+		if len(topic) == 0 {
+			return false
+		}
+		return matchTopicTokens(pattern[1:], topic[1:])
+	default:
+		if len(topic) == 0 || pattern[0] != topic[0] {
+			return false
+		}
+		return matchTopicTokens(pattern[1:], topic[1:])
+	}
+}
